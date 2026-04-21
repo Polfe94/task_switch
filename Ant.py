@@ -59,7 +59,10 @@ class Ant(Agent):
 			r = range(len(pos))
 			for i in r:
 				x = [self.model.coords[self.move_history[1]], self.model.coords[self.move_history[2]], self.model.coords[pos[i]]]
-				p.append(self.mot_matrix[direction(x)])
+				try:
+					p.append(self.mot_matrix[direction(x)])
+				except:
+					print(x)
 
 			idx = np.random.choice(r, p = p / np.sum(p)) # normalize to 1 in case probabilities don't already sum 1
 			return pos[idx]
@@ -214,8 +217,9 @@ class Ant(Agent):
 		self.model.remove_agent(self)
 		self.is_active = False
 		self.pos = 'nest'
-		self.ant2explore()
 		self.origin = nest
+		self.ant2explore()
+
 		
 		if len(self.food):
 			self.food[-1].in_nest(self.model.time)
