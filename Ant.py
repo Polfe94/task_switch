@@ -1,37 +1,30 @@
 from mesa import Agent
 import numpy as np
-from functions import direction, get_cos
+from functions import direction, get_cos , get_cos_180, dist 
 import math
-from parameters import nest, theta
+from parameters import nest, theta # , nest_influence, direction_bias
 import random
 
 ''' ANT AGENT '''
 class Ant(Agent):
 
-	def __init__(self, unique_id, model, mot_matrix, behavior, init_position, homing_behavior = False, social = True, g = np.random.uniform(0.0, 1.0)):
+	def __init__(self, unique_id, model, mot_matrix, behavior, g = np.random.uniform(0.0, 1.0), social = True):
 
 		super().__init__(unique_id, model)
 
 		self.Si = 0
 		self.g = g
-		# self.g = 0.75
 
 		self.is_active = False
 		self.state = '0'
+		self.status = 'gamma'
 		self.behavior_tag = behavior
-		self.init_position = init_position
-		self.informed = False
-		self.last_interaction = 0
-		if homing_behavior:
-			self.action = self.action_with_homing
-		else:
-			self.action = self.action_without_homing
-   
+
 		self.origin = nest
 
 		self.food = []
 
-		self.leave_nest()
+		self.pos = 'nest'
    
 		self.reset_movement()
 		self.move_default = self.move_exp
@@ -42,18 +35,17 @@ class Ant(Agent):
 			self.interaction = self.interaction_with_recruitment
 		else:
 			self.interaction = self.interaction_without_recruitment
-		
+ 
+	def update_movement(self):
+		self.move_history = (self.move_history[1], self.move_history[2], self.pos)
+  
 
 	def reset_movement(self):
 		self.movement = 'default'
-		# self.move_history = (None, None, None)
-		self.move_history = (self.pos, 
-				random.choice(self.model.grid.get_neighbors(self.pos)),
-				self.pos)
-		# self.move_history = (self.init_position, 
-        #                random.choice(self.model.grid.get_neighbors(self.init_position)),
-        #                self.init_position)
- 
+		self.move_history = (self.origin, 
+				random.choice(self.model.grid.get_neighborhood(self.origin)),
+				self.origin)
+		
 	def update_movement(self):
 		self.move_history = (self.move_history[1], self.move_history[2], self.pos)
 
@@ -107,7 +99,7 @@ class Ant(Agent):
 	# Move method
 	def move(self):
      
-		possible_steps = self.model.grid.get_neighbors(
+		possible_steps = self.model.grid.get_neighborhood(
 		self.pos,
 		include_center = False)
 
@@ -119,13 +111,19 @@ class Ant(Agent):
 
 		self.model.grid.move_agent(self, pos)
 		self.model.nodes['N'][self.model.nodes['Node'].index(self.pos)] += 1
-		# self.model.nodes.loc[self.model.nodes['Node'] == self.pos, 'N'] += 1
 		self.update_movement()
-
+ 
 
 	def find_neighbors(self):
+     
+		boolean = self.pos == 'nest'
     
-		alist = self.model.grid.get_cell_list_contents([self.pos])
+		if boolean:
+   
+			alist = self.model.states['alpha']
+
+		else:
+			alist = self.model.grid.get_cell_list_contents([self.pos])
    
 		flist = list(filter(lambda a: a.unique_id != self.unique_id, alist))
   
@@ -136,21 +134,15 @@ class Ant(Agent):
 		else:
 			neighbors = []
 
-		return neighbors
+		return neighbors, boolean
 
-	def memory(self):
-		t = self.model.time - self.last_interaction
-		p = 1 - math.exp(-self.model.memory_rate * t)
-		if p >= 0.5: self.informed = False ## if the probability is larger than the exponential half life
-		# if p >= np.random.random(): self.informed = False ## stochastic version // too strict
 
 	def interaction_with_recruitment(self):
-		neighbors = self.find_neighbors()
+		neighbors, in_nest = self.find_neighbors()
 
 		s = [] # state
 		z = [] # activity
 		t = [] # target
-		int_type = self.behavior_tag + '_' + self.movement + '+'
   
 		l = len(neighbors)
 		if l:
@@ -159,13 +151,6 @@ class Ant(Agent):
 				s.append(i.state)
 				z.append(self.model.Jij[self.state + "-" + i.state]* i.Si - self.model.Theta)
 				if hasattr(i, 'food_location'): t.append(self.model.coords[i.food_location])
-				# info transmission
-				if i.informed: 
-					self.informed = True
-					self.last_interaction = self.model.time
-
-
-				int_type += i.behavior_tag + '_' + i.movement + '+'
 
 			z = sum(z)
 
@@ -174,18 +159,14 @@ class Ant(Agent):
 			z = 0
 		self.Si = math.tanh(self.g * (z + self.Si -self.model.Theta) ) # update activity
 		if len(t):
-		# if len(t) and not hasattr(self, 'target'):
 			self.target = t[-1]
 			self.movement = 'target'
    
-		return int_type[:-1]
-
 	def interaction_without_recruitment(self):
-		neighbors = self.find_neighbors()
+		neighbors, in_nest = self.find_neighbors()
 
 		s = [] # state
 		z = [] # activity
-		int_type = self.behavior_tag + '_' + self.movement + '+'
   
 		l = len(neighbors)
 		if l:
@@ -193,53 +174,52 @@ class Ant(Agent):
 			for i in neighbors:
 				s.append(i.state)
 				z.append(self.model.Jij[self.state + "-" + i.state]* i.Si - self.model.Theta)
-				int_type += i.behavior_tag + '_' + i.movement + '+'
-				# info transmission
-				if i.informed:
-					self.informed = True
-					self.last_interaction = self.model.time
-					
+
 			z = sum(z)
    
 		else:
 			z = 0
 		self.Si = math.tanh(self.g * (z + self.Si -self.model.Theta) ) # update activity
 		
-		return int_type[:-1]
- 
-	def interaction_without_recruitment(self):
-		neighbors = self.find_neighbors()
 
-		s = [] # state
-		z = [] # activity
-  
-		l = len(neighbors)
-		if l:
-			# for more than one neighbor...
-			for i in neighbors:
-				s.append(i.state)
-				z.append(self.model.Jij[self.state + "-" + i.state]* i.Si - self.model.Theta)
-
-			z = sum(z)
+	def update_status(self):
+		self.check_status()
+		for i in self.model.states:
+			try:
+				self.model.states[i].remove(self)
+			except:
+				continue
+	
+		if self.status == 'gamma':
+			self.model.states['alpha'].append(self)
+			self.model.states['gamma'].append(self)
    
 		else:
-			z = 0
-		self.Si = math.tanh(self.g * (z + self.Si -self.model.Theta) ) # update activity
-
-	def activate(self):
-		self.Si = np.random.random()
-		self.is_active = True
-		self.ant2explore()
-
+			self.model.states[self.status].append(self)
+	
+	def check_status(self):
+		if self.is_active:
+			self.status = 'beta'
+		else:
+			if self.Si > theta:
+				self.status = 'alpha'
+			else:
+				self.status = 'gamma'
+ 
 	def leave_nest(self):
-		self.model.grid.place_agent(self, self.init_position)
+		self.model.grid.place_agent(self, nest)
 		self.is_active = True
-		# self.activate()
 
 	def enter_nest(self):
+		self.model.remove_agent(self)
 		self.is_active = False
+		self.pos = 'nest'
 		self.ant2explore()
+		self.origin = nest
 		
+		if len(self.food):
+			self.food[-1].in_nest(self.model.time)
+
 	def ant2nest(self):
 		self.target = self.model.coords[nest]
 		self.movement = 'homing'
@@ -263,84 +243,53 @@ class Ant(Agent):
 		self.food[-1].dropped(self.model.time)
 		self.food.pop()
 	
-	def action_without_homing(self):
+  
+	def action(self, rate):
+		
+		if rate == 'alpha':
+			if len(self.food):
+				self.drop_food()
+			else:
+				if self.Si > theta:
+					self.leave_nest()
+
+		elif rate == 'beta':
+	  
+			if len(self.food):
+				self.ant2nest()
     
-		self.memory()
-		self.move()
-		int_type = self.interaction()
-		return int_type
+			if self.Si < theta:
+				self.ant2nest()
 
-
-	def action_with_homing(self):
-
-		self.memory()
-
-		if self.Si < theta:
-		# if not self.active:
-			self.ant2nest()
-   
 			if self.pos == nest:
-				self.enter_nest()
+				if hasattr(self, 'target') and self.target == self.model.coords[nest]:
+					self.enter_nest()
 
-				## SPONTANEOUS ACTIVATION
-				if np.random.random() < 0.5: # <---- CHANGEEEEED!!!
-				# if np.random.random() < 0.01: # probability of random activation
-					self.activate()
+				else:
+					self.move()
 
+			elif self.pos in self.model.food_positions:
+       
+				if not self.model.food[self.pos][-1].is_detected:
+					self.model.food[self.pos][-1].detected(self.model.time, self.origin)
+     
+				self.origin = self.pos
+       
+				if hasattr(self, 'target') and self.model.coords[self.pos] == self.target:
+					self.ant2explore()
+	   
+				if self.model.food_dict[self.pos] > 0 and not len(self.food):
+					self.pick_food()
+
+				else:
+					self.move()
+     
 			else:
 				self.move()
-
-		else:
-			self.move()
-
-		int_type = self.interaction()
-		return int_type
-
-
-	### +++ ORIGINAL VERSION vFIXED !!! +++ ###
-	# def action(self):
-	
-	# 	# if len(self.food):
-	# 	# 	self.ant2nest()
-
-	# 	# if self.Si < theta:
-	# 	# 	self.ant2nest()
    
-	# 	# 	if self.pos == nest:
-	# 	# 		self.enter_nest()
+		else:
+			self.Si = np.random.uniform(0.0, 1.0) ## spontaneous activation
 
-	# 	# 		## SPONTANEOUS ACTIVATION
-	# 	# 		if np.random.random() < 0.01:
-	# 	# 			self.activate()
-    
-	# 	# 	else:
-	# 	# 		self.move()
 
-	# 	# else:
-	# 	# 	self.move()
-
-	# 	# -------------------------------------------------#
-	# 	# elif self.pos in self.model.food_positions:
-	
-	# 	# 	if not self.model.food[self.pos][-1].is_detected:
-	# 	# 		self.model.food[self.pos][-1].detected(self.model.time, self.origin)
-	
-	# 	# 	self.origin = self.pos
-	
-	# 	# 	if hasattr(self, 'target') and self.model.coords[self.pos] == self.target:
-	# 	# 		self.ant2explore()
-	
-	# 	# 	if self.model.food_dict[self.pos] > 0 and not len(self.food):
-	# 	# 		self.pick_food()
-
-	# 	# 	else:
-	# 	# 		self.move()
-	
-	# 	# else:
-	# 	# 	self.move()
-	# 	# -------------------------------------------------#
-  
-	# 	self.move()
-
-	# 	int_type = self.interaction()
-	# 	return int_type
+		self.interaction()
+		self.update_status()

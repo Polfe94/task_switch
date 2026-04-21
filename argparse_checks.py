@@ -1,6 +1,8 @@
 import sys
-from functions import argparser
 from Model import *
+from functions import argparser
+Jij = {'0-0': 1,'1-1': 1,'1-0': 1,'0-1': 1}
+
 
 if __name__ == '__main__':
 	params = argparser()
@@ -10,8 +12,5 @@ if __name__ == '__main__':
 		if hasattr(m, i):
 			print(i, getattr(m, i))
 		else:
-			if hasattr(m.agents[0], i):
-				print(i, getattr(m.agents[0], i))
-			else:
-				print('Model has no attribute', i)
+			print('Model has no attribute', i)
 	sys.exit(0)

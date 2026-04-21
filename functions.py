@@ -2,7 +2,7 @@ import numpy as np
 import math
 from scipy.spatial import distance
 import sys, getopt
-from parameters import beta, Jij, Theta
+from parameters import alpha, beta, gamma, Jij, Theta
 import json
 import pandas as pd
 from itertools import compress
@@ -107,7 +107,6 @@ def moving_average(x, t, overlap = 0, tvec = None):
                 v.append(0)
     
         return v
-
 def direction(x):
     x = np.round(np.array(x), 5)
     if np.all(x[2] == x[0]):
@@ -203,19 +202,34 @@ def plot_arena(model, data = None, path = None):
     z = [a.loc[a['pos'] == i, 'N'] for i in model.xy]
     zq = np.unique(z, return_inverse = True)[1]
     model.plot_lattice(zq)
+    
+def parsefood(arg):
+    v = np.array([(0, 0), (0, -1), (0, -2), (-1, -2), (-1, -1), (-1, 0)])
+    splarg = arg.split(':')
+    food_inits = splarg[1].split(';')
+    if splarg[0] == 'tl':
+        foodlist = []
+        for i in food_inits:
+            foodlist += [(x, y) for x, y in np.array(eval(i)) + v]
+    elif splarg[0] == 'rand':
+        foodlist = [eval(i) for i in food_inits]
+        
+    return foodlist
+
 
 def argparser(argv = sys.argv[1:]):
         
-    opts, args = getopt.getopt(argv, 'n:d:x:f:p:g:s:i:',
+    opts, args = getopt.getopt(argv, 'n:d:x:f:m:p:g:r:s:t:',
                             ['nruns=', 'directory=', 'filename=', 
-                                'food=', 'parameters=',
-                            'gains=', 'social_feedbacks=',
-                            'init_pos='])
+                                'food=', 'movement=', 'parameters=',
+                            'gains=', 'recruitment=', 'social_feedbacks=',
+                            'targets'])
 
     parameters = {'filename': 'simulation',
                'runs': 1, 'results_path': '../results/',
-               'food_condition': 'nf',
-               'beta': beta, 'Jij': Jij,
+               'food_condition': 'det',
+               'alpha': alpha, 'beta': beta, 
+                  'gamma': gamma, 'Jij': Jij,
                  'Theta': Theta}
 
     for opt, arg in opts:
@@ -228,14 +242,21 @@ def argparser(argv = sys.argv[1:]):
         elif opt in ('-x', '--filename'):
             parameters['filename'] = arg
             
-        elif opt in ('-i', '--init_pos'):
-            parameters['init_position'] = arg
-            
         elif opt in ('-f', '--food'):
             splarg = arg.split(',')
             parameters['food_condition'] = splarg[0]
             if len(splarg) == 2:
                 parameters['d'] = splarg[1]
+                
+        elif opt in ('-t', '--targets'):
+            parameters['food_positions'] = parsefood(arg)
+
+            
+        elif opt in ('-m', '--movement'):
+            parameters['default_movement'] = arg
+   
+        elif opt in ('-r', '--recruitment'):
+            parameters['recruitment'] = eval(arg)
    
         if opt in ('-s', '--social_feedbacks'):
                 parameters['feedback'] = arg
@@ -250,8 +271,6 @@ def argparser(argv = sys.argv[1:]):
                     parameters['beta'] = eval(x[1])
                 elif x[0] == 'gamma':
                     parameters['gamma'] = eval(x[1])
-                elif x[0] == 'N':
-                    parameters['N'] = int(x[1])
                 elif x[0] == 'Jij':
                     j = eval(x[1])
                     if type(j) == dict:
@@ -265,17 +284,6 @@ def argparser(argv = sys.argv[1:]):
                     parameters['rho'] = eval(x[1])
                 elif x[0] == 'epsilon':
                     parameters['epsilon'] = eval(x[1])
-                elif x[0] == 'init_position':
-                    parameters['init_position'] = str(x[1])
-
-                elif x[0] == 'tmax':
-                    parameters['tmax'] = eval(x[1])
-                    
-                elif x[0] == 'memory_rate':
-                    parameters['memory_rate'] = x[1]
-                elif x[0] == 'homing_behavior':
-                    parameters['homing_behavior'] = eval(x[1])
-
                 else:
                     print('Unknown parameter', x[0], flush= True)
                     try:

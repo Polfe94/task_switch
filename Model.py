@@ -1,28 +1,23 @@
 from mesa import space, Model, Agent
 from Food import Food
 import networkx as nx
-from Ant import np, Ant, math, nest
+from Ant import np, Ant, math, nest, dist
 import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.stats import pearsonr
-from functions import rotate, moving_average, discretize_time, fill_hexagon, dist
-from parameters import N, beta,foodXvertex, food_condition, width, height, Jij, Theta, scout_mov, recruit_mov
+from functions import rotate, moving_average, discretize_time, fill_hexagon, parsefood
+from parameters import N, alpha, beta, gamma, foodXvertex, food_condition, width, height, mov_matrix, Jij, Theta
 import pyarrow as pa
 import pyarrow.parquet as pq
-import random
 
 
 ''' MODEL '''
 class Model(Model):
 
-    def __init__(self, beta = beta, Theta = Theta, Jij = Jij, N = N, 
-              width = width, height = height, food_condition = food_condition, 
-              **kwargs):
+    def __init__(self, alpha = alpha, beta = beta, gamma = gamma, Theta = Theta, Jij = Jij, N = N, 
+              width = width, height = height, food_condition = food_condition, **kwargs):
 
         super().__init__()
-        
-        self.matrices = {'scout': scout_mov, 'recruit': recruit_mov}
-        self.N = N
 
         if 'Theta' not in kwargs:
             self.Theta = Theta
@@ -35,14 +30,9 @@ class Model(Model):
             self.Jij = kwargs['Jij']
    
         if 'tmax' not in kwargs:
-            self.tmax = 2000
+            self.tmax = 10800
         else:
             self.tmax = kwargs['tmax']
-            
-        if 'init_position' not in kwargs:
-            init_position = 'random'
-        else:
-            init_position = kwargs.pop('init_position')
    
         if 'feedback' not in kwargs:
             self.feedback = 'both'
@@ -50,7 +40,7 @@ class Model(Model):
             self.feedback = kwargs['feedback']
 
         if 'rho' not in kwargs:
-            self.rho = 0.5
+            self.rho = 1 # default used to be 0.5
         else:
             self.rho = round(kwargs['rho'], 2)
    
@@ -58,9 +48,8 @@ class Model(Model):
             self.epsilon = 1
         else:
             self.epsilon = round(kwargs['epsilon'], 2)
-            
-        if 'homing_behavior' not in kwargs:
-            kwargs['homing_behavior'] = False
+
+        self.matrices = {'global': mov_matrix, 'scout': mov_matrix, 'recruit': mov_matrix}   
 
         nds = [(0, i) for i in range(1, 44, 2)]
 
@@ -75,71 +64,77 @@ class Model(Model):
         y = [xy[1] for xy in self.coords.values()]
         xy = [rotate(x[i], y[i], theta = math.pi / 2) for i in range(len(x))]
         self.xy = dict(zip(self.coords.keys(), xy))
-        # self.network = dict(zip(self.coords.keys(), [0]))
-        # self.network[nest] = N
-        # if 'd' in kwargs:
-        #     d = float(kwargs["d"])
-        #     if d < 0:
-        #         self.distance = 3
-        #     elif d > 26:
-        #         self.distance = 26
-        #     else:
-        #         self.distance = d
-        # else:
-        #     self.distance = 13
-
-        ### RATE OF FORGETTING INFORMATION ###
-        if 'memory_rate' not in kwargs:
-            self.memory_rate = 0
+        if 'd' in kwargs:
+            d = float(kwargs["d"])
+            if d < 0:
+                self.distance = 3
+            elif d > 26:
+                self.distance = 26
+            else:
+                self.distance = d
         else:
-            # self.memory_rate = (self.N / len(list(self.xy.keys()))) * kwargs['memory_rate']
-            self.memory_rate =  float(kwargs['memory_rate'])
+            self.distance = 13
+            
+        if 'food_positions' not in kwargs:
+            self.food_positions = parsefood("tl:(7, 34);(7, 12)")
+        #     self.food_positions = [(6, 33), (6, 34), (7, 34), # patch 1
+        # (7, 33), (7, 32), (6, 32),
+        # (6, 11), (6, 12), (7, 12), # patch 2
+        # (7, 11), (7, 10), (6, 10)]
+        else:
+            l = sum([i in self.xy.keys() for i in kwargs['food_positions']])
+            if len(kwargs['food_positions']) > l:
+                print('Invalid food positions, defaulting to "deterministic" placements')
+                self.food_positions = parsefood("tl:(7, 34);(7, 12)")
+            else:
+                self.food_positions = kwargs['food_positions']
   
         # Agents
-        self.init_agents(init_position, **kwargs)
-            # self.agents[i] = Ant(i, self)
+        self.N = N
+        self.init_agents(**kwargs)
    
-        # Init first active agent
-        # self.agents[0].Si = np.random.uniform(0.0, 1.0)
-        
-        #### CHANGED !!
-        # self.agents[0].Si = 1
+        # states & rates
+        self.states = {'alpha': list(self.agents.values()), 'beta': [], 'gamma': list(self.agents.values())}
+        self.S = np.array([self.N, 0, self.N])
+        self.rates = np.array([alpha, beta, gamma])
+
   
-        # Food
+        # Init first active agent
+        self.agents[0].Si = np.random.uniform(0.0, 1.0)
+        self.agents[0].update_status()
+  
+          # Food
         self.food_condition = food_condition
         self.init_food()
         self.food_coords = [self.coords[i] for i in self.food_positions]
 
-# 		self.data = pd.DataFrame({'T': [], 'Frame': [],
-#    'N': [], 'Si_out': [], 'pos': [],
-#    'id_out': [], 'Si_in': []})
-#         self.data = {'T': [], 'Frame': [],
-#    'N': [], 'Si_out': [], 'pos': [],
-#    'id_out': [], 'Si_in': []}
-#         self.data = {'T': [], 'Frame': [],
-#    'N': [], 'pos': [], 'food_target': [], 'id_out': []}
-        self.data = {'T': [0] * self.N, 'id': [self.agents[i].unique_id for i in self.agents],
-                     'int_type': [self.agents[i].behavior_tag + '_' + self.agents[i].movement for i in self.agents], 
-                     'node': [str(self.agents[i].pos) for i in self.agents],
-                     'x': [self.xy[self.agents[i].pos][0] for i in self.agents], 
-                     'y': [self.xy[self.agents[i].pos][1] for i in self.agents], 
-                     'movement': [self.agents[i].movement for i in self.agents],
-                     'information' : [False] * self.N}
-        self.info = [0] * self.N
+        self.keys = {'id': [self.agents[i].unique_id for i in self.agents],
+               'g': [self.agents[i].g for i in self.agents], 'behavior': [self.agents[i].behavior_tag for i in self.agents]}
 
+        self.data = {'T': [], 'id': [], 
+                     'node': [], 'x': [], 'y': [], 'movement': []}
 
         # Rates
-        self.R_t = beta * self.N
+        self.update_rates()
+        self.rate2prob()
 
         # Time & Gillespie
+        self.time = 0
         self.sample_time()
-        self.time = 0 + self.rng_t
 
         self.iters = 0
         # self.gamma_counter = 0
         self.init_nodes() ## initializes some metrics by node
 
         self.sampled_agent = [np.nan]
+  
+    def update_rates(self):
+        self.S = np.array([len(i) for i in list(self.states.values())])
+        self.r = self.S * self.rates # np.array([self.alpha, self.beta, self.gamma]) 
+
+    def rate2prob(self):
+        self.R_t = np.sum(self.r)
+        self.r_norm = self.r / self.R_t
 
     def sample_time(self):
         self.rng = np.random.random()
@@ -159,15 +154,33 @@ class Model(Model):
     def step(self, tmax):
 
         while self.time < tmax:
+      
+            process = np.random.choice(['alpha', 'beta', 'gamma'], p = self.r_norm)
+   
+            if process == 'alpha':
+                    
+                agent = np.random.choice(self.states['alpha'])
+    
+            elif process == 'beta':
 
-            agent = self.agents[0]# np.random.choice(list(self.agents.values()))
+                agent = np.random.choice(self.states['beta'])
+    
+            else:
+
+                agent = np.random.choice(self.states['gamma'])
+
+                # self.gamma_counter += 1
+
             self.sampled_agent.append(agent.unique_id)
-
+   
             # do action
-            int_type = agent.action()
+            agent.action(process)
+   
 
-            self.collect_data(int_type=int_type)
-            # self.collect_data(agent = agent, prev_state = prev_state)
+            self.collect_data()
+   
+            self.update_rates()
+            self.rate2prob()
             
             # get time for next iteration
             self.time += self.rng_t
@@ -176,85 +189,33 @@ class Model(Model):
             self.sample_time()
             self.iters += 1
 
-            if not self.info[0]:
-                self.info[0] = True
-                self.agents[0].informed = True
-                self.agents[0].last_interaction = self.time
+    def collect_data(self):
+        node = []
+        x = []
+        y = []
+        id = []
+        target = []
+        l = len(self.states['beta'])
+        if l:
+            for i in self.states['beta']:
+                node.append(str(i.pos))
+                xy = self.xy[i.pos]
+                x.append(xy[0])
+                y.append(xy[1])
+                target.append(i.movement)
+                id.append(i.unique_id)
+    
+            self.data['T'].extend([self.time] * l)
+            self.data['id'].extend(id)
+            self.data['node'].extend(node)
+            self.data['x'].extend(x)
+            self.data['y'].extend(y)
+            self.data['movement'].extend(target)
+        
 
-
-    def collect_data(self, int_type):
-        agent = self.agents[self.sampled_agent[-1]]
-        xy = self.xy[agent.pos]
-        self.data['T'].append(self.time)
-        self.data['id'].append(agent.unique_id)
-        self.data['int_type'].append(int_type)
-        self.data['node'].append(str(agent.pos))
-        self.data['x'].append(xy[0])
-        self.data['y'].append(xy[1])
-        self.data['movement'].append(agent.movement)
-        self.data['information'].append(agent.informed)
-        self.info[agent.unique_id] = agent.informed
-
-    """TOO LARGE FILES; UPDATING COLLECT DATA IN FAVOR OF A COMPRESSED VERSION"""
-    # def collect_data(self, int_type):
-    #     node = []
-    #     x = []
-    #     y = []
-    #     id = []
-    #     target = []
-    #     interaction = []
-    #     # information transfer
-    #     information = []
-
-    #     for i in self.agents.values():
-    #         node.append(str(i.pos))
-    #         xy = self.xy[i.pos]
-    #         x.append(xy[0])
-    #         y.append(xy[1])
-    #         target.append(i.movement)
-    #         id.append(i.unique_id)
-    #         if id[-1] == self.sampled_agent[-1]:
-    #             interaction.append(int_type)
-    #         else:
-    #             interaction.append('none_none')
-    #         information.append(i.informed)
-
-
-    #     self.data['T'].extend([self.time] * self.N)
-    #     self.data['id'].extend(id)
-    #     self.data['int_type'].extend(interaction)
-    #     self.data['node'].extend(node)
-    #     self.data['x'].extend(x)
-    #     self.data['y'].extend(y)
-    #     self.data['movement'].extend(target)
-    #     self.data['information'].extend(information)
-
-    # def collect_data(self):
-
-    #     pos = ''
-    #     # target = 0
-    #     # id_out = ''
-    #     for i in self.agents.values():
-    #         pos += str(i.pos) + ';'
-    #         # target += int(hasattr(i, 'target') and i.target in self.food_coords)
-    #         # Si_out += str(i.Si) + ','
-    #         # id_out += str(i.unique_id) +','
-   
-    #     # for i in self.states['alpha']:
-    #     #     Si_in += str(i.Si) +','
-   
-    #     self.data['T'].append(self.time)
-    #     self.data['Frame'].append(round(self.time * 2))
-    #     # self.data['Si_out'].append(Si_out[:-1])
-    #     self.data['pos'].append(pos[:-1])
-    #     # self.data['id_out'].append(id_out[:-1])
-    #     # self.data['Si_in'].append(Si_in[:-1])
-    #     # self.data['food_target'].append(target)
-
-
-   
-    def init_agents(self, init_position, **kwargs):
-     
+        
+    def init_agents(self, **kwargs):
+         
         if 'g' in kwargs:
             
             # must be passed as: size, type, value 1, value 2
@@ -273,7 +234,7 @@ class Model(Model):
                             g += list(np.random.uniform(low = float(v1), high = float(v2), size = int(s)))
                 if len(g) < self.N:
                     print('Warning: Less gains than population size passed to parametrization')
-                    g += np.random.uniform(low = 0.0, high = 1.0, size = N - len(g))
+                    g += np.random.uniform(low = 0.0, high = 1.0, size = self.N - len(g))
                 elif len(g) > self.N:
                     print('Warning: More gains than population size passed to parametrization')
                     g = g[:self.N]
@@ -291,145 +252,63 @@ class Model(Model):
 
         nLR = round(self.N * self.rho)
         nSR = self.N - nLR
-        behav = np.array(['scout'] * nLR + ['recruit'] * nSR, dtype = '<U7')
-        indices = np.array(list(range(nLR, self.N)))
+        indices = np.random.choice(self.N, size = nSR,replace=False)
         
-        # indices = np.random.choice(self.N, size = nSR,replace=False)
-        # behav = np.array(['scout'] * self.N, dtype = '<U7')
-        # behav[indices] = 'recruit'
+        behav = np.array(['scout'] * self.N, dtype = '<U7')
+        behav[indices] = 'recruit'
         mask = np.ones(self.N, dtype = bool)
-        if len(indices):
-            mask[indices] = False
-        # rec = np.array([False] * self.N)
-        rec = np.array([True] * self.N)
+        mask[indices] = False
+        rec = np.array([False] * self.N)
         
         
-        # # social feedbacks [LR]
-        # if self.feedback == 'scout':
-        #     nlisten = round(nLR * self.epsilon) 
-        #     idx_listen = np.random.choice(np.array(list(range(self.N)))[mask], size = nlisten, replace = False)
+        # social feedbacks [LR]
+        if self.feedback == 'scout':
+            nlisten = round(nLR * self.epsilon) 
+            idx_listen = np.random.choice(np.array(list(range(self.N)))[mask], size = nlisten, replace = False)
             
             
-        # # social feedbacks [LR]    
-        # elif self.feedback == 'recruit':
-        #     nlisten = round(nSR * self.epsilon) 
-        #     idx_listen = np.random.choice(indices, size = nlisten, replace = False)
+        # social feedbacks [LR]    
+        elif self.feedback == 'recruit':
+            nlisten = round(nSR * self.epsilon) 
+            idx_listen = np.random.choice(indices, size = nlisten, replace = False)
     
-        # # social feedbacks [Both]
-        # else:
-        #     nlisten = round(nLR * (self.epsilon))
-        #     idx_listen = np.random.choice(np.array(list(range(self.N)))[mask], size = nlisten, replace = False)
-        #     nlisten = round(nSR * (self.epsilon))
-        #     idx_listen = np.append(idx_listen, np.random.choice(indices, size = nlisten, replace = False))
+        # social feedbacks [Both]
+        else:
+            nlisten = round(nLR * (self.epsilon))
+            idx_listen = np.random.choice(np.array(list(range(self.N)))[mask], size = nlisten, replace = False)
+            nlisten = round(nSR * (self.epsilon))
+            idx_listen = np.append(idx_listen, np.random.choice(indices, size = nlisten, replace = False))
             
-        # rec[idx_listen] = True
-        # print('Number of LR: ', round(nLR * (self.epsilon)), '\n',
-        #       'Number of SR: ', round(nSR * (self.epsilon)), '\n',
-        #       'Total number of recruits: ', len(set(idx_listen)), flush = True)
+        rec[idx_listen] = True
+      
             
         self.agents = {}
-
-        if init_position == 'nest':
-            ### ORIGINAL VERSION vFIXED ###
-            positions = [nest] * self.N
-            darray = np.array([dist(self.xy[i], self.xy[nest]) for i in self.xy])
-            idx_0 = np.random.choice(np.where((darray > 1) & (darray < 3))[0], size = 1)
-            positions[0] = list(self.xy.keys())[idx_0[0]]
-            # positions[0] = random.choice(list(self.xy.keys()))
-            
-            
-            ## fixed distances in straight line from the nest !! 
-            # positions[0] = (4, 22) # (7, 22) # (10, 22) 
-
-        elif init_position == 'clustered':
-
-            x0node = random.choice(list(self.xy.keys()))
-            x0 = self.xy[x0node]
-            darray = np.array([dist(self.xy[i], x0) for i in self.xy])
-            idx_0 = np.random.choice(np.where((darray > 1) & (darray < 3))[0], size = 1)
-            positions = [x0node] * self.N
-            positions[0] = list(self.xy.keys())[idx_0[0]]
-            # positions[0] = random.choice(list(self.xy.keys()))
-
-        else:
-            positions = random.choices(list(self.xy.keys()), k = self.N)
-
-            if init_position == 'targeted':
-
-                if 'R' in kwargs:
-                    R = kwargs['R']
-                else:
-                    R = 3.0 # formerly 2.0
-
-                # if not 'agg_scouts' in kwargs or not eval(kwargs['agg_scouts']):
-                if not 'agg_scouts' in kwargs or not kwargs['agg_scouts']:
-
-                    # CODE FOR RECRUITS
-                    if nSR > 0:
-                        positions = np.array(positions)
-                        nodes = np.array(list(self.xy.keys()))
-                        x0 = random.choice(list(self.xy.values()))
-                        darray = np.array([dist(self.xy[i], x0) for i in self.xy])
-                        idx_clust = np.where(darray < R)[0]# np.where((darray > R) & (darray < R))[0]
-                        idx_not_clust = np.where(darray > R)[0]
-                        
-                        #### DISTANCE CHANGED !!
-                        idx_0 = np.random.choice(np.where((darray > 1) & (darray < 3))[0], size = 1)
-                        # idx_0 = np.random.choice(np.where((darray > 10.25) & (darray < 11.75))[0], size = 1)
-                        clustered_indices = np.random.choice(idx_clust, size = nSR, replace = True)
-                        positions[indices] = [tuple(x) for x in nodes[clustered_indices]]
-                        
-                        if nLR > 0:
-                            not_clustered_indices = np.random.choice(idx_not_clust, size = nLR, replace = True)
-                            positions[:nLR] = [tuple(x) for x in nodes[not_clustered_indices]]
-                        positions = [tuple(x) for x in positions]
-                        positions[0] = list(self.xy.keys())[idx_0[0]]
-                # else:
-                #     # CODE FOR SCOUTS
-                #     if nLR > 0:
-                #         positions = np.array(positions)
-                #         nodes = np.array(list(self.xy.keys()))
-                #         x0 = random.choice(list(self.xy.values()))
-                #         darray = np.array([dist(self.xy[i], x0) for i in self.xy])
-                #         idx = np.where(darray < R)[0]# np.where((darray > R) & (darray < R))[0]
-                #         clustered_indices = np.random.choice(idx, size = nLR, replace = True)
-                #         positions[mask] = [tuple(x) for x in nodes[clustered_indices]]
-                #         positions = [tuple(x) for x in positions]
-                #         positions[0] = random.choice(list(self.xy.keys()))
-                   
         for i in range((self.N-1), -1, -1):
-            self.agents[i] = Ant(i, self, g=g[i], social=rec[i], mot_matrix=self.matrices[behav[i]], behavior = behav[i],
-                                 init_position=positions[i], homing_behavior=kwargs['homing_behavior'])
-        
-        # QUANTIFY INFORMATION TRANSMISSION
-        self.agents[0].informed = True
-
-    def set_default_movement(self, matrix = recruit_mov):
-        for i in range(len(self.agents)):
-            self.agents[i].mot_matrix = matrix
+            self.agents[i] = Ant(i, self, g=g[i], social=rec[i], mot_matrix=self.matrices[behav[i]], behavior=behav[i])
    
     def init_food(self):
      
         self.food_in_nest = 0
         if self.food_condition == 'det':
+            if self.food_positions == [(6, 33), (6, 34), (7, 34), # patch 1
+    (7, 33), (7, 32), (6, 32),
+    (6, 11), (6, 12), (7, 12), # patch 2
+    (7, 11), (7, 10), (6, 10)]:
+                print('No food positions were provided. Defaulting to "deterministic" food placement')
             self.init_det()
-        # elif self.food_condition == 'dist':
-        #     self.init_dist()
-        # elif self.food_condition == 'sto_1':
-        #     self.init_sto()
-        # elif self.food_condition == 'sto_2':
-        #     self.init_stoC()
+        elif self.food_condition == 'dist':
+            self.init_dist()
+        elif self.food_condition == 'sto_1':
+            self.init_sto()
+        elif self.food_condition == 'sto_2':
+            self.init_stoC()
         elif self.food_condition == 'nf':
             self.init_nf()
         else:
-            print('No valid food conditions, initing determinist condition by default')
+            print('No valid food conditions, initializing determinist condition by default')
             self.init_det()
             
     def init_det(self):
-        self.food_positions = [(6, 33), (6, 34), (7, 34), # patch 1
-    (7, 33), (7, 32), (6, 32),
-    (6, 11), (6, 12), (7, 12), # patch 2
-    (7, 11), (7, 10), (6, 10)]
         self.food_dict = dict.fromkeys(self.food_positions, foodXvertex)  
         food_id = -1
   
@@ -441,64 +320,64 @@ class Model(Model):
                 self.food[i][x].unique_id = food_id
                 food_id -= 1
     
-    # def init_dist(self):
-    #     tolerance = 1.5
-    #     food_id = -1
-    #     darray = np.array([dist(self.xy[i], self.xy[nest]) for i in self.xy])
-    #     idx = np.where((darray > (self.distance - tolerance)) & (darray < (self.distance + tolerance)))[0]
+    def init_dist(self):
+        tolerance = 1.5
+        food_id = -1
+        darray = np.array([dist(self.xy[i], self.xy[nest]) for i in self.xy])
+        idx = np.where((darray > (self.distance - tolerance)) & (darray < (self.distance + tolerance)))[0]
 
-    #     nodes = np.array(list(self.xy.keys()))
-    #     food_indices = np.random.choice(idx, size = 12, replace = False)
-    #     self.food_positions = [tuple(x) for x in nodes[food_indices]]
-    #     self.food_dict = dict.fromkeys(self.food_positions, foodXvertex)
-    #     self.food = {}
-    #     for i in self.food_dict:
-    #         self.food[i] = [Food(i)] * foodXvertex
-    #         for x in range(foodXvertex):
-    #             self.grid.place_agent(self.food[i][x], i)
-    #             self.food[i][x].unique_id = food_id
-    #             food_id -= 1
+        nodes = np.array(list(self.xy.keys()))
+        food_indices = np.random.choice(idx, size = 12, replace = False)
+        self.food_positions = [tuple(x) for x in nodes[food_indices]]
+        self.food_dict = dict.fromkeys(self.food_positions, foodXvertex)
+        self.food = {}
+        for i in self.food_dict:
+            self.food[i] = [Food(i)] * foodXvertex
+            for x in range(foodXvertex):
+                self.grid.place_agent(self.food[i][x], i)
+                self.food[i][x].unique_id = food_id
+                food_id -= 1
     
-    # def init_sto(self):
-    #     food_id = -1
+    def init_sto(self):
+        food_id = -1
   
-    #     nodes = np.array(list(self.xy.keys()))
-    #     food_indices = np.random.choice(len(self.xy), size = 12, replace = False)
-    #     self.food_positions = [tuple(x) for x in nodes[food_indices]]
-    #     self.food_dict = dict.fromkeys(self.food_positions, foodXvertex)
-    #     self.food = {}
-    #     for i in self.food_dict:
-    #         self.food[i] = [Food(i)] * foodXvertex
-    #         for x in range(foodXvertex):
-    #             self.grid.place_agent(self.food[i][x], i)
-    #             self.food[i][x].unique_id = food_id
-    #             food_id -= 1
+        nodes = np.array(list(self.xy.keys()))
+        food_indices = np.random.choice(len(self.xy), size = 12, replace = False)
+        self.food_positions = [tuple(x) for x in nodes[food_indices]]
+        self.food_dict = dict.fromkeys(self.food_positions, foodXvertex)
+        self.food = {}
+        for i in self.food_dict:
+            self.food[i] = [Food(i)] * foodXvertex
+            for x in range(foodXvertex):
+                self.grid.place_agent(self.food[i][x], i)
+                self.food[i][x].unique_id = food_id
+                food_id -= 1
     
-    # def init_stoC(self):
-    #     food_id = -1
+    def init_stoC(self):
+        food_id = -1
   
-    #     nodes = np.array(list(filter(lambda a: self.xy[a][1] > 0.5, self.xy)))
-    #     food_indices = np.random.choice(len(nodes), size = 2, replace = False)
-    #     self.food_positions = [tuple(x) for x in nodes[food_indices]]
-    #     bl = [(i, j) for j in range(45, 2, -2) for i in range(1, 12, 2)] + [(i, j) for j in range(44, 1, -2) for i in range(2, 13, 2)]
-    #     clusters = []
-    #     for i in self.food_positions:
-    #         if i in bl:
-    #             clusters.extend(fill_hexagon(i))
-    #         else:
-    #             l = [dist(self.xy[i], self.xy[target]) for target in bl]
-    #             idx = np.argmin(l)
-    #             clusters.extend(fill_hexagon(bl[idx]))
+        nodes = np.array(list(filter(lambda a: self.xy[a][1] > 0.5, self.xy)))
+        food_indices = np.random.choice(len(nodes), size = 2, replace = False)
+        self.food_positions = [tuple(x) for x in nodes[food_indices]]
+        bl = [(i, j) for j in range(45, 2, -2) for i in range(1, 12, 2)] + [(i, j) for j in range(44, 1, -2) for i in range(2, 13, 2)]
+        clusters = []
+        for i in self.food_positions:
+            if i in bl:
+                clusters.extend(fill_hexagon(i))
+            else:
+                l = [dist(self.xy[i], self.xy[target]) for target in bl]
+                idx = np.argmin(l)
+                clusters.extend(fill_hexagon(bl[idx]))
     
-    #     self.food_positions = clusters
-    #     self.food_dict = dict.fromkeys(self.food_positions, foodXvertex)
-    #     self.food = {}
-    #     for i in self.food_dict:
-    #         self.food[i] = [Food(i)] * foodXvertex
-    #         for x in range(foodXvertex):
-    #             self.grid.place_agent(self.food[i][x], i)
-    #             self.food[i][x].unique_id = food_id
-    #             food_id -= 1
+        self.food_positions = clusters
+        self.food_dict = dict.fromkeys(self.food_positions, foodXvertex)
+        self.food = {}
+        for i in self.food_dict:
+            self.food[i] = [Food(i)] * foodXvertex
+            for x in range(foodXvertex):
+                self.grid.place_agent(self.food[i][x], i)
+                self.food[i][x].unique_id = food_id
+                food_id -= 1
     
     def init_nf(self):
         self.food = dict.fromkeys((), [np.nan])
@@ -513,15 +392,10 @@ class Model(Model):
         if plots:
             self.plot_N()
    
-        # self.z = [self.nodes.loc[self.nodes['Node'] == i, 'N'] for i in self.xy]
         self.z = self.nodes['N']
         self.zq = np.unique(self.z, return_inverse = True)[1]
-        # self.pos = {'node': self.nodes['Node'], 'x': [x[0] for x in self.nodes['Coords']],
-        #                   'y': [x[1] for x in self.nodes['Coords']], 'z': self.zq}
-        self.pos = {'node': [str(i) for i in self.nodes['Node']], 'x': [x[0] for x in self.nodes['Coords']],
-                    'y': [x[1] for x in self.nodes['Coords']], 'z': self.zq}
-        # self.pos = pd.DataFrame({'node': list(self.xy.keys()), 'x': [x[0] for x in self.xy.values()],
-        #                   'y': [x[1] for x in self.xy.values()], 'z': self.zq})
+        self.pos = {'node': self.nodes['Node'], 'x': [x[0] for x in self.nodes['Coords']],
+                          'y': [x[1] for x in self.nodes['Coords']], 'z': self.zq}
         try:
             self.collect_results()
             print('+++ Results collected successfully! +++', flush = True)
@@ -529,14 +403,13 @@ class Model(Model):
             Exception('Could not collect results')
             print('Could not collect results', flush = True)
             
-    def run_until(self):
-        self.tmax = 0
-        while sum(self.info) < self.N:
-            if self.time > 15000: # constraining simulation duration;
-                break
+    def run_exploration(self, plots = False):
+        while sum([self.food[i][-1].is_detected for i in self.food]) == 0:
             self.step(tmax = self.time + 1)
   
         print('+++ Model successfully run... Collecting results... +++', flush = True)
+        if plots:
+            self.plot_N()
    
         self.z = self.nodes['N']
         self.zq = np.unique(self.z, return_inverse = True)[1]
@@ -552,39 +425,15 @@ class Model(Model):
 
   
     def collect_results(self, fps = 2):
-     
- 
-        # result = pd.DataFrame({'T': self.data['T'], 'N': self.data['N']})
-        # result['Frame'] = result['T'] // (1 / fps)
-        # df = result.groupby('Frame').agg({'N': 'mean'}).reset_index()
 
-        food = {'node': list(self.food.keys()),
+        food = {'node': [str(i) for i in self.food.keys()],
                 't': [round(food.detection_time,3) if food.is_detected else np.nan for foodlist in self.food.values() for food in foodlist ],
-                'origin': [food.detection_origin if food.is_detected else None for foodlist in self.food.values() for food in foodlist ]}
+                'origin': [str(food.detection_origin) if food.is_detected else str(None) for foodlist in self.food.values() for food in foodlist ]}
   
-        # self.df = df
         self.food_df = food
-        self.df = pd.DataFrame(self.data)
-  
-    # def run_food(self, tmax, plots = False):
-    #     n = sum(self.model.food_dict.values())
-    #     t = 1
-    #     while sum(self.model.food_dict.values()) == n:
-    #         self.step(t)
-    #         t += 1
-    #     self.step(tmax + t)
-    #     if plots:
-    #         self.plot_N()
-    #         self.plot_I()
 
     def save_results(self, path, filename):
-     
-        # try:
-        #     self.df.to_parquet(path + filename + '.parquet', index=False, compression = 'gzip', engine = 'pyarrow')
-        #     print('Saved N', flush = True)
-        # except:
-        #     Exception('Not saved!')
-        #     print('N not saved!', flush = True)
+
    
         try:
             data = pa.Table.from_pydict(self.data)
@@ -594,13 +443,13 @@ class Model(Model):
             Exception('Not saved!')
             print('Data not saved!', flush = True)
    
-        # try:
-        #     food = pa.Table.from_pydict(self.food_df)
-        #     pq.write_table(food, path + filename + '_food.parquet', compression = 'gzip')
-        #     print('Saved food', flush = True)
-        # except:
-        #     Exception('Not saved!')
-        #     print('Food not saved!', flush = True)
+        try:
+            food = pa.Table.from_pydict(self.food_df)
+            pq.write_table(food, path + filename + '_food.parquet', compression = 'gzip')
+            print('Saved food', flush = True)
+        except:
+            Exception('Not saved!')
+            print('Food not saved!', flush = True)
 
         try:
             pos = pa.Table.from_pydict(self.pos)
@@ -609,17 +458,14 @@ class Model(Model):
         except:
             Exception('Not saved!')
             print('Positions not saved!', flush = True)
-            
-    def plot_init_pos(self):
-        nLR = int(self.rho * self.N)
-        plt.scatter([x[0] for x in self.xy.values()], [x[1] for x in self.xy.values()], c = 'black')
-        # plt.scatter([self.xy[i.pos][0] for i in lself.agents[:nLR]], [self.xy[i.pos][1] for i in self.agents[:nLR]])
-        plt.scatter([self.xy[i.pos][0] for i in list(self.agents.values())[:nLR]], [self.xy[i.pos][1] for i in list(self.agents.values())[:nLR]], s = 25)
-        plt.scatter([self.xy[i.pos][0] for i in list(self.agents.values())[nLR:]], [self.xy[i.pos][1] for i in list(self.agents.values())[nLR:]], s = 25)
-        plt.scatter(self.xy[self.agents[0].pos][0], self.xy[self.agents[0].pos][1], s = 30)
 
-        plt.scatter(self.xy[nest][0], self.xy[nest][1], marker = '^', s = 125, c = 'black')
-        plt.show()
+        try:
+            keys = pa.Table.from_pydict(self.keys)
+            pq.write_table(keys, path + filename + '_keys.parquet',compression = 'gzip')
+            print('Saved keys', flush = True)
+        except:
+            Exception('Not saved!')
+            print('Keys not saved!', flush = True)
 
     def plot_lattice(self, z = None, labels = False):
         
@@ -655,10 +501,8 @@ class Model(Model):
         plt.fill([x[0] for x in xyfood[0]], [x[1] for x in xyfood[0]], c = 'grey')
         plt.fill([x[0] for x in xyfood[1]], [x[1] for x in xyfood[1]], c = 'grey')
   
-        sbst = self.df.loc[self.df['id'] == id]
-        xy = [self.xy[eval(i)] for i in sbst['node']]
-        # plt.scatter([x[0] for x in xy], [x[1] for x in xy], alpha = 1, c = list(range(len(xy))),cmap = 'viridis', zorder = 2)
-        plt.scatter([x[0] for x in xy], [x[1] for x in xy], alpha = 1, c = list(sbst['T']),cmap = 'viridis', zorder = 2)
+        xy = [self.xy[i] for i in self.agents[id].path]
+        plt.scatter([x[0] for x in xy], [x[1] for x in xy], alpha = 1, c = list(range(len(xy))),cmap = 'viridis', zorder = 2)
   
         e = list(self.g.edges)
         for i in e:

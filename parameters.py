@@ -3,15 +3,17 @@
 """"""""""""""""""""""""""
 
 ''' MODEL '''
-N = 25 # number of automata
-beta = 0.25 # 1.5 # rate of action in arena
+N = 100 # number of automata
+alpha = 2*10**-3 # 4.25*10**-3 # rate of action in nest
+beta = 0.6 # 1.5 # rate of action in arena
+gamma = 10**-5 # spontaneous activation
 foodXvertex = 1
 
 # sto_1: randomly distributed food (stochastic)
 # sto_2: stochastic with clusterized food (hexagon patches)
 # det: deterministic (sto_2 but with a specific and fixed positioning, emulating deterministic experiments)
 # nf: no food (simulations without food)
-food_condition = 'nf'# 'sto_1', 'sto_2', 'nf'
+food_condition = 'det'# 'sto_1', 'sto_2', 'nf'
 
 ''' LATTICE PARAMETERS '''
 #Lattice size
@@ -19,6 +21,8 @@ width    = 22
 height   = 13
 
 nest = (0, 22)
+nest_influence = [nest, (1, 21), (1, 22), (1, 23)] 
+# direction_bias = 2 
 
 ''' THRESHOLDS ''' 
 theta = 0
@@ -28,9 +32,7 @@ Theta = 10**-10 # 10**-15
 # 0 - No info; 1 - Info
 Jij = {'0-0': 0.01, '0-1': 1,
 	   '1-0': 0.01, '1-1': 1}
-
-''' Turning probabilities '''              
-scout_mov = {'l': 0.4185, 'b': 0.1841, 'r': 0.3974}
-recruit_mov = {'l': 0.3783, 'b': 0.3038, 'r': 0.3179}
-
-
+    
+''' Rounded matrix '''
+mov_matrix = {'l': 0.4, 'b': 0.2, 'r': 0.4}
+    
