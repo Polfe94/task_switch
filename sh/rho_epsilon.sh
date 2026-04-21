@@ -8,7 +8,7 @@ cd
 export PATH=/home/soft/python-3.9.5/bin:$PATH
 export LD_LIBRARY_PATH=/home/soft/python-3.9.5/bin/$LD_LIBRARY_PATH
 
-. ~/research/automatenv/bin/activate
+. ~/research/AntsEnv/bin/activate
 for rho in $(seq 0.001 0.1 1.001)
 do
     for epsilon in $(seq 0.001 0.1 1.001)
