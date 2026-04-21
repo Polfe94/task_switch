@@ -5,8 +5,7 @@
 
 cd
 
-export PATH=/home/soft/python-3.9.5/bin:$PATH
-export LD_LIBRARY_PATH=/home/soft/python-3.9.5/bin/$LD_LIBRARY_PATH
+module load Python/3.10.4-GCCcore-11.3.0
 
 . ~/research/AntsEnv/bin/activate
 python3 ~/research/task_switch/run_cluster.py --directory ~/research/CHAPTER4/results_simulations/sto/ --filename sto1 -n 100 -p "rho=1;epsilon=1" -t "tl:(10,13);(8,17)"

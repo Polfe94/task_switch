@@ -5,8 +5,7 @@
 
 cd
 
-export PATH=/home/soft/python-3.9.5/bin:$PATH
-export LD_LIBRARY_PATH=/home/soft/python-3.9.5/bin/$LD_LIBRARY_PATH
+module load Python/3.10.4-GCCcore-11.3.0
 
 . ~/research/AntsEnv/bin/activate
 for rho in $(seq 0.001 0.1 1.001)
